@@ -67,6 +67,12 @@ class RegexTokenizer:
         self.merges = {}
         self.vocab = {i: bytes([i]) for i in range(256)}
         self.compiled_pattern = re.compile(GPT4_SPLIT_PATTERN)
+        self.special_tokens = {}
+        self.inverse_special_tokens = {}
+
+    def register_special_tokens(self, special_tokens):
+        self.special_tokens = special_tokens
+        self.inverse_special_tokens = {v: k for k, v in special_tokens.items()}
 
     def _get_stats(self, ids, counts=None):
         if counts is None:
@@ -119,7 +125,7 @@ class RegexTokenizer:
             ids = self._merge(ids, pair, new_idx)
         return ids
 
-    def encode(self, text):
+    def encode_ordinary(self, text):
         chunks = self.compiled_pattern.findall(text)
         all_ids = []
         for chunk in chunks:
@@ -128,8 +134,37 @@ class RegexTokenizer:
             all_ids.extend(chunk_ids)
         return all_ids
 
+    def encode(self, text, allowed_special="none"):
+        if allowed_special == "all":
+            special_set = set(self.special_tokens.keys())
+        elif allowed_special == "none":
+            special_set = set()
+        elif isinstance(allowed_special, (set, list)):
+            special_set = set(allowed_special)
+        else:
+            raise ValueError(f"unknown allowed_special {allowed_special}")
+
+        if not special_set:
+            return self.encode_ordinary(text)
+
+        special_pattern = re.compile("(" + "|".join(re.escape(t) for t in special_set) + ")")
+        parts = special_pattern.split(text)
+        ids = []
+        for part in parts:
+            if part in special_set:
+                ids.append(self.special_tokens[part])
+            else:
+                ids.extend(self.encode_ordinary(part))
+        return ids
+
     def decode(self, ids):
-        text_bytes = b"".join(self.vocab[idx] for idx in ids)
+        part_bytes = []
+        for idx in ids:
+            if idx in self.inverse_special_tokens:
+                part_bytes.append(self.inverse_special_tokens[idx].encode("utf-8"))
+            else:
+                part_bytes.append(self.vocab[idx])
+        text_bytes = b"".join(part_bytes)
         return text_bytes.decode("utf-8", errors="replace")
 
 
