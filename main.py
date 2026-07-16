@@ -219,14 +219,62 @@ class RegexTokenizer(Tokenizer):
                 ids.extend(self.encode_ordinary(part))
         return ids
 
+class GPT4Tokenizer(RegexTokenizer):
+    def __init__(self):
+        super().__init__()
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        mergable_ranks = enc._mergeable_ranks
+
+        self.byte_shuffle = {i: mergable_ranks[bytes([i])] for i in range(256)}
+        self.inverse_byte_shuffle = {v : k for k,v in self.byte_shuffle.items()}
+
+        print("recovering merges,may take time...")
+        self.merges = self._recover_merges(mergable_ranks)
+        print("Success !")
+
+        self.vocab = {idx : bytes([i]) for i,idx in self.byte_shuffle.items()}
+
+        for (p0,p1) , idx in self.merges.items():
+            self.vocab[idx] = self.vocab[p0] + self.vocab[p1]
+
+        self.register_special_tokens(enc._special_tokens)
+
+    def _encode_chunk(self, ids):
+        ids = [self.byte_shuffle[b] for b in ids]
+        return super()._encode_chunk(ids)
+
+    def _recover_merges(self,mergable_ranks):
+        merges = {}
+
+        sorted_ranks = sorted(
+            [(rank,b) for b,rank in mergable_ranks.items() if len(b) > 1]
+        )
+
+        for rank,b in sorted_ranks:
+            ids = [self.byte_shuffle[byte] for byte in b]
+            while len(ids) >= 2:
+                stats = {}
+                for pair in zip(ids,ids[1:]):
+                    stats[pair] = stats.get(pair,0) + 1
+                pair = min(stats,key=lambda p : merges.get(p,float("inf")))
+                if pair not in merges: break
+
+                new_idx = merges[pair]
+                ids = self._merge(ids,pair,new_idx)
+            assert len(ids) == 2
+            merges[(ids[0],ids[1])] = rank
+        return merges
 
 if __name__ == "__main__":
-    with open("taylorswift.txt", "r", encoding="utf-8") as f:
-        text = f.read()
+    tokenizer = GPT4Tokenizer()
 
-    tokenizer = RegexTokenizer()
-    tokenizer.train(text, vocab_size=512)
+    # print a few recovered merges to sanity check they look reasonable
+    print("\nfirst 5 recovered merge rules:")
+    for pair, idx in list(tokenizer.merges.items())[:5]:
+        p0_bytes = tokenizer.vocab[pair[0]]
+        p1_bytes = tokenizer.vocab[pair[1]]
+        combined_bytes = tokenizer.vocab[idx]
+        print(f"id {pair[0]} ({p0_bytes}) + id {pair[1]} ({p1_bytes}) -> id {idx} ({combined_bytes})")
 
-    ids = tokenizer.encode("hello world!")
-    print(ids)
-    print(tokenizer.decode(ids))
